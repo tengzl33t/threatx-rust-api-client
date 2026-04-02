@@ -1,105 +1,485 @@
+/*
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+SPDX-License-Identifier: MPL-2.0
+SPDX-FileCopyrightText: Copyright tengzl33t
+
+Author: tengzl33t
+*/
+use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
-use hyper;
-use http_body_util::{BodyExt, Empty};
-use hyper::{body::Buf, Request};
-use serde::Deserialize;
+use hyper::{Method, Request, body::Buf};
+use hyper_util::rt::TokioExecutor;
 
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fmt::format;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+#[derive(Debug)]
+enum RequestError {
+    TokenExpired,
+    IncorrectState,
 }
+
+static ENDPOINT_MAP: LazyLock<HashMap<&str, (u8, Vec<&str>)>> = LazyLock::new(|| {
+    HashMap::from_iter([
+        ("apikeys", (2, vec!["list", "new", "update", "revoke"])),
+        ("apischemas", (1, vec!["save", "list", "delete"])),
+        (
+            "customers",
+            (
+                1,
+                vec![
+                    "list",
+                    "list_all",
+                    "new",
+                    "get",
+                    "update",
+                    "delete",
+                    "list_api_keys",
+                    "new_api_key",
+                    "delete_api_key",
+                    "get_customer_config",
+                    "set_customer_config",
+                ],
+            ),
+        ),
+        ("users", (1, vec!["list", "new", "get", "update", "delete"])),
+        (
+            "sites",
+            (2, vec!["list", "new", "get", "delete", "update", "unset"]),
+        ),
+        ("sitegroups", (1, vec!["list", "save", "delete"])),
+        ("templates", (1, vec!["set", "get", "delete"])),
+        ("sensors", (1, vec!["list", "tags"])),
+        ("services", (1, vec!["list"])),
+        (
+            "entities",
+            (
+                1,
+                vec![
+                    "list",
+                    "show",
+                    "state_changes",
+                    "risk_changes",
+                    "notes",
+                    "new_note",
+                    "reset",
+                    "block_entity",
+                    "blacklist_entity",
+                    "whitelist_entity",
+                    "watch_entity",
+                    "list_most_risky",
+                    "count",
+                ],
+            ),
+        ),
+        (
+            "metrics",
+            (
+                1,
+                vec![
+                    "request_stats_by_hour",
+                    "request_stats_by_minute",
+                    "match_stats_by_hour",
+                    "block_stats_by_endpoint",
+                    "entity_stats_by_entity_by_quarter_hour",
+                    "rules_matched_by_ip_by_quarter_hour",
+                    "request_stats_by_endpoint",
+                    "threat_stats_by_endpoint",
+                    "threat_stats_by_hour",
+                    "threat_stats_by_quarter_hour",
+                    "threat_stats_by_site",
+                    "status_codes_by_site",
+                    "request_stats_hourly_by_site",
+                    "request_stats_hourly_by_endpoint",
+                ],
+            ),
+        ),
+        (
+            "subscriptions",
+            (1, vec!["save", "delete", "list", "enable", "disable"]),
+        ),
+        ("globaltags", (1, vec!["new", "list"])),
+        ("actortags", (1, vec!["new", "list", "delete"])),
+        ("features", (1, vec!["list", "query", "save", "delete"])),
+        ("channels", (1, vec!["new", "list", "update"])),
+        ("globalsettings", (1, vec!["get"])),
+        ("dnsinfo", (1, vec!["list"])),
+        (
+            "logs",
+            (
+                1,
+                vec![
+                    "events",
+                    "entities",
+                    "blocks",
+                    "actions",
+                    "matches",
+                    "rule_hits",
+                    "sysinfo",
+                    "audit_log",
+                ],
+            ),
+        ),
+        (
+            "logsv2",
+            (2, vec!["block_events", "match_events", "audit_events"]),
+        ),
+        (
+            "lists",
+            (
+                1,
+                vec![
+                    "list_blacklist",
+                    "list_blocklist",
+                    "list_whitelist",
+                    "list_ignorelist",
+                    "new_blacklist",
+                    "new_blocklist",
+                    "new_whitelist",
+                    "new_ignorelist",
+                    "bulk_new_blacklist",
+                    "bulk_new_blocklist",
+                    "bulk_new_whitelist",
+                    "bulk_new_ignorelist",
+                    "get_blacklist",
+                    "get_blocklist",
+                    "get_whitelist",
+                    "get_ignorelist",
+                    "delete_blacklist",
+                    "delete_blocklist",
+                    "delete_whitelist",
+                    "delete_ignorelist",
+                    "bulk_delete_blacklist",
+                    "bulk_delete_blocklist",
+                    "bulk_delete_whitelist",
+                    "bulk_delete_ignorelist",
+                    "ip_to_link",
+                ],
+            ),
+        ),
+        (
+            "rules",
+            (
+                1,
+                vec![
+                    "list_customer_rules",
+                    "list_whitelist_rules",
+                    "list_profiler_rules",
+                    "list_common_rules",
+                    "new_customer_rule",
+                    "new_whitelist_rule",
+                    "new_common_rule",
+                    "update_customer_rule",
+                    "update_whitelist_rule",
+                    "update_profiler_rule",
+                    "update_common_rule",
+                    "get_customer_rule",
+                    "get_whitelist_rule",
+                    "get_profiler_rule",
+                    "get_common_rule",
+                    "delete_customer_rule",
+                    "delete_whitelist_rule",
+                    "delete_profiler_rule",
+                    "delete_common_rule",
+                    "validate_rule",
+                ],
+            ),
+        ),
+    ])
+});
 
 fn get_header() -> String {
     format!("ThreatX-Rust-API-Client/{}", env!("CARGO_PKG_VERSION"))
 }
 
-fn get_api_host_part(api_env: &str) -> String {
-    let predefined_envs: HashMap<&str, &str>  = HashMap::from_iter(
-        [
-            ("xplat", "protect"),
-            ("xplat-reporting", "protect-reporting")
-        ]
-    );
-    let domain_part = "threatx.io".to_string();
-
-    if predefined_envs.contains_key(api_env) {
-        return format!("https://api.{}.{}", predefined_envs[api_env], domain_part);
+fn get_api_host_part(api_env: &str) -> Result<String, String> {
+    if api_env.is_empty() {
+        return Err("Incorrect API environment provided".to_string());
     }
 
-    format!("https://{}.{}", api_env, domain_part)
+    let domain_part = "threatx.io".to_string();
+
+    let subdomain = match api_env {
+        "xplat" => "api.protect",
+        "xplat-reporting" => "api.protect-reporting",
+        other => other
+    };
+
+    Ok(format!("https://{}.{}", subdomain, domain_part))
 }
 
 fn get_api_version_part(version: u8) -> Result<String, String> {
-    if version < 1 || version > 2 {
+    if !(1..=2).contains(&version) {
         return Err("Version must be between 1 and 2".to_string());
     }
 
     Ok(format!("/tx_api/v{}", version))
 }
-#[tokio::main]
-async fn process_requests() -> Result<Vec<String>, hyper::Error> {
-    let url = "https://jsonplaceholder.typicode.com/todos/1".parse::<hyper::Uri>()?;
-    let host = url.host().expect("uri has no host");
-    let port = url.port_u16().unwrap_or(80);
-    let addr = format!("{}:{}", host, port);
-    println!("addr: {}", addr);
-    let stream = TcpStream::connect(addr).await?;
-    let io = TokioIo::new(stream);
 
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            println!("Connection failed: {:?}", err);
-        }
-    });
+fn get_hyper_client() -> Client<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    Full<Bytes>,
+> {
+    let https = HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .unwrap()
+        .https_only()
+        .enable_http1()
+        .enable_http2()
+        .build();
 
-    let authority = url.authority().unwrap().clone();
-
-    // Fetch the url...
-    let req = Request::builder()
-        .uri(url)
-        .header(hyper::header::HOST, authority.as_str())
-        .body(Empty::<Bytes>::new())?;
-
-    let res = sender.send_request(req).await?;
-
-    // asynchronously aggregate the chunks of the body
-    let body = res.collect().await?.aggregate();
-    // try to parse as json with serde_json
-    let parsed_body = serde_json::from_reader(body.reader())?;
-
-    println!("{}", parsed_body);
-    Ok("".to_string())
+    Client::builder(TokioExecutor::new()).build(https)
 }
 
-fn login(api_env: &str, api_key: &str) -> String {
+fn prepare_payload(
+    mut payload: Value,
+    token: &Option<&str>,
+    allowed_commands: &Option<&[String]>,
+) -> Result<Full<Bytes>, Box<dyn std::error::Error>> {
+    let error_msg = format!("Command not found for payload: {}", payload);
+    let p_command = payload
+        .get("command")
+        .expect(error_msg.as_str())
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    if allowed_commands.is_some() && !allowed_commands.as_ref().unwrap().contains(&p_command) {
+        return Err(format!("Command not found: {}", p_command).into());
+    }
+    if token.is_some() {
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("token".to_string(), json!(token));
+    }
+
+    Ok(Full::new(Bytes::from(
+        serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| panic!("Failed to serialize provided payload: {}", payload)),
+    )))
+}
+
+async fn send_single_request(
+    url: &str,
+    client: &Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Full<Bytes>,
+    >,
+    payload: &Full<Bytes>,
+) -> Result<Value, RequestError> {
+    let request = Request::builder()
+        .uri(url)
+        .header(hyper::header::USER_AGENT, get_header())
+        .method(Method::POST)
+        .body(payload.clone())
+        .unwrap();
+
+    let res = client.request(request).await.unwrap();
+    let body = res.collect().await.unwrap().aggregate();
+    let parsed_body: Value = serde_json::from_reader(body.reader()).expect("Failed to parse JSON");
+
+    if let Some(ok) = parsed_body.get("Ok") {
+        return Ok(ok.clone());
+    }
+    if let Some(error) = parsed_body.get("Error") {
+        if error == "Token Expired. Please re-authenticate." {
+            return Err(RequestError::TokenExpired);
+        }
+        return Ok(error.clone());
+    }
+    Err(RequestError::IncorrectState)
+}
+
+async fn process_single_request(
+    url: &str,
+    client: &Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Full<Bytes>,
+    >,
+    allowed_commands: &[String],
+    payload: Value,
+    token: Arc<RwLock<String>>,
+    token_refresh_lock: Arc<Mutex<()>>,
+    api_env: &str,
+    api_key: &str,
+) -> Result<Value, String> {
+    let current_token = token.read().await.clone();
+
+    let bytes_payload = prepare_payload(
+        payload.clone(),
+        &Some(&current_token),
+        &Some(allowed_commands),
+    )
+    .expect("Could not prepare payload");
+
+    let response = send_single_request(url, client, &bytes_payload).await;
+
+    match response {
+        Err(RequestError::TokenExpired) => {
+            let current_token = {
+                let _refresh_guard = token_refresh_lock.lock().await;
+
+                let current = token.read().await.clone();
+                if current == current_token {
+                    let refreshed = login(api_env, api_key, client).await.unwrap();
+                    *token.write().await = refreshed.clone();
+                    refreshed
+                } else {
+                    current
+                }
+            };
+
+            let bytes_payload = prepare_payload(
+                payload,
+                &Some(&current_token),
+                &Some(allowed_commands),
+            )
+            .expect("Could not prepare payload");
+
+            send_single_request(url, client, &bytes_payload)
+                .await
+                .map_err(|e| format!("{:?}", e))
+        }
+        Ok(val) => Ok(val),
+        Err(e) => Err(format!("{:?}", e)),
+    }
+}
+
+async fn process_requests(
+    url: &str,
+    client: &Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Full<Bytes>,
+    >,
+    allowed_commands: Vec<String>,
+    token: String,
+    api_env: &str,
+    api_key: &str,
+    payloads: Vec<Value>,
+) -> Result<Vec<Result<Value, String>>, Box<dyn std::error::Error>> {
+    let semaphore = Arc::new(Semaphore::new(70));
+    let token = Arc::new(RwLock::new(token));
+    let token_refresh_lock = Arc::new(Mutex::new(()));
+    let mut task_set = JoinSet::new();
+
+    let url = url.to_string();
+    let client = client.clone();
+    let api_env = api_env.to_string();
+    let api_key = api_key.to_string();
+    let allowed_commands = Arc::new(allowed_commands); // avoid cloning vec per task
+
+    for payload in payloads {
+        let semaphore = semaphore.clone();
+        let token = Arc::clone(&token);
+        let token_refresh_lock = Arc::clone(&token_refresh_lock);
+        let url = url.clone();
+        let client = client.clone();
+        let api_env = api_env.clone();
+        let api_key = api_key.clone();
+        let allowed_commands = Arc::clone(&allowed_commands);
+
+        task_set.spawn(async move {
+            let _semaphore_permit = semaphore.acquire().await.unwrap();
+
+            process_single_request(
+                &url,
+                &client,
+                &allowed_commands,
+                payload,
+                token,
+                token_refresh_lock,
+                &api_env,
+                &api_key,
+            )
+            .await
+        });
+    }
+
+    Ok(task_set.join_all().await)
+}
+
+async fn login(
+    api_env: &str,
+    api_key: &str,
+    client: &Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Full<Bytes>,
+    >,
+) -> Result<String, Box<dyn std::error::Error>> {
     let url = format!(
         "{}{}/login",
-        get_api_host_part(api_env),
-        get_api_version_part(1).unwrap(),
+        get_api_host_part(api_env)?,
+        get_api_version_part(1)?,
     );
-    url
+
+    let payload = prepare_payload(
+        json!({ "api_token": api_key, "command": "login" }),
+        &None,
+        &None,
+    )
+    .expect("Could not prepare payload");
+
+    let response = send_single_request(
+        &url,
+        client,
+        &payload,
+    )
+    .await;
+
+    let token = match response {
+        Ok(login_response_value) => login_response_value
+            .get("token")
+            .expect("Failed to get token value")
+            .clone(),
+        Err(err) => return Err(format!("Failed to get login response: {:?}", err).into()),
+    };
+
+    println!("Login response: {:?}", token);
+
+    if token.is_null() {
+        return Err("Failed to get token".into());
+    }
+
+    Ok(token.as_str().unwrap().to_string())
 }
 
-#[tokio::main]
-async fn main() -> Result<String, String> {
-    process_requests()
+pub async fn send_requests(
+    api_env: &str,
+    api_key: &str,
+    endpoint: &str,
+    payloads: Vec<Value>,
+) -> Result<Vec<Result<Value, String>>, Box<dyn std::error::Error>> {
+    let endpoint_config = &ENDPOINT_MAP[endpoint];
+
+    let client = get_hyper_client();
+    let token = login(api_env, api_key, &client).await?;
+
+    let url = format!(
+        "{}{}/{}",
+        get_api_host_part(api_env)?,
+        get_api_version_part(endpoint_config.0)?,
+        endpoint
+    );
+
+    let allowed_commands = endpoint_config.1.iter().map(|s| s.to_string()).collect();
+
+    process_requests(
+        &url,
+        &client,
+        allowed_commands,
+        token,
+        api_env,
+        api_key,
+        payloads,
+    )
+    .await
 }
-
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//
-//     #[test]
-//     fn it_works() {
-//         // get_api_host("api");
-//         println!("{}", get_api_version_part(1).unwrap());
-//         println!("{}", get_header());
-//         println!("{}", process_requests());
-//     }
-// }
