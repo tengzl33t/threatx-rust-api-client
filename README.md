@@ -38,8 +38,8 @@ Code examples are available [here](./docs/examples).
 
 ## Contributing & Support
 
-Feel free to open an [issue](./issues) or
-a [pull request](./pulls) if you find a bug or want to suggest a new
+Feel free to open an [issue](/../../issues) or
+a [pull request](/../../pulls) if you find a bug or want to suggest a new
 feature.
 For more information, check out
 our [contributing guide](./CONTRIBUTING.md).
