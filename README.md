@@ -10,7 +10,7 @@
 
 ## Description
 
-Python aiohttp based ThreatX Rust API Client is lightweight Rust library designed to streamline the
+ThreatX Rust API Client is lightweight Rust library designed to streamline the
 interaction with ThreatX API.
 
 ## Features
@@ -18,7 +18,7 @@ interaction with ThreatX API.
 - Async backend
 - Command validation
 - Error handling
-- Response marking  [TODO]
+- Response marking [TODO]
 - Token auto renewal
 
 ## Installation
