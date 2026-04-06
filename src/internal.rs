@@ -299,6 +299,7 @@ async fn send_single_request(
     Err(RequestError::IncorrectState)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_single_request(
     url: &str,
     client: &Client<

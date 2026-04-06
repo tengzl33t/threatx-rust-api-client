@@ -1,13 +1,16 @@
 name: Test
 
 on:
-  workflow_dispatch:
   pull_request:
     branches:
       - main
   push:
     branches:
       - main
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,7 +23,7 @@ permissions:
 jobs:
   get-changed-files:
     name: Get changed files
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-arm64
     outputs:
       matrix: ${{ steps.changed-files.outputs.all_modified_files }}
     steps:
@@ -38,7 +41,7 @@ jobs:
   test:
     name: Test
     needs: get-changed-files
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-arm64
     if: ${{ needs.get-changed-files.outputs.matrix != '[]' }}
     steps:
       - name: Repo checkout
@@ -47,9 +50,13 @@ jobs:
       - name: Prepare environment
         uses: "./.github/actions/environment"
 
+      - name: Style check
+        shell: bash
+        run: cargo clippy
+
       - name: Tests
         shell: bash
-        run: cargo test
+        run: cargo nextest run
 
   results:
     name: Test results
