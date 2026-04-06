@@ -488,4 +488,3 @@ mod tests {
         assert_eq!(json_result.get("token").unwrap(), token_value);
     }
 }
-
