@@ -1,0 +1,65 @@
+name: Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  get-changed-files:
+    name: Get changed files
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.changed-files.outputs.all_modified_files }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v47
+        with:
+          matrix: true
+          files: |
+            src/**
+
+  test:
+    name: Test
+    needs: get-changed-files
+    runs-on: ubuntu-latest
+    if: ${{ needs.get-changed-files.outputs.matrix != '[]' }}
+    steps:
+      - name: Repo checkout
+        uses: actions/checkout@v6
+
+      - name: Prepare environment
+        uses: "./.github/actions/environment"
+
+      - name: Tests
+        run: cargo test
+
+  results:
+    name: Test results
+    needs: test
+    runs-on: ubuntu-latest
+    if: ${{ always() && !cancelled() }}
+    steps:
+      - run: |
+          result="${{ needs.test.result }}"
+          if [[ $result == "success" || $result == "skipped" ]]; then
+            exit 0
+          else
+            exit 1
+          fi
