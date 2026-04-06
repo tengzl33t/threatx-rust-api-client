@@ -23,7 +23,7 @@ permissions:
 jobs:
   get-changed-files:
     name: Get changed files
-    runs-on: ubuntu-latest-arm64
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.changed-files.outputs.all_modified_files }}
     steps:
