@@ -46,4 +46,3 @@ pub async fn send_requests(
     )
     .await
 }
-
