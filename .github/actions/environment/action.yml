@@ -14,4 +14,5 @@ runs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build project
+      shell: bash
       run: cargo build

@@ -48,6 +48,7 @@ jobs:
         uses: "./.github/actions/environment"
 
       - name: Tests
+        shell: bash
         run: cargo test
 
   results:
