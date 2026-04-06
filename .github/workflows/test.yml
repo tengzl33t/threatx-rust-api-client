@@ -41,7 +41,7 @@ jobs:
   test:
     name: Test
     needs: get-changed-files
-    runs-on: ubuntu-latest-arm64
+    runs-on: ubuntu-latest
     if: ${{ needs.get-changed-files.outputs.matrix != '[]' }}
     steps:
       - name: Repo checkout
