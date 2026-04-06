@@ -243,7 +243,7 @@ fn prepare_payload(
     mut payload: Value,
     token: &Option<&str>,
     allowed_commands: &Option<&[String]>,
-) -> Result<Full<Bytes>, Box<dyn std::error::Error>> {
+) -> Result<Bytes, Box<dyn std::error::Error>> {
     let error_msg = format!("Command not found for payload: {}", payload);
     let p_command = payload
         .get("command")
@@ -262,10 +262,10 @@ fn prepare_payload(
             .insert("token".to_string(), json!(token));
     }
 
-    Ok(Full::new(Bytes::from(
+    Ok(Bytes::from(
         serde_json::to_vec(&payload)
             .unwrap_or_else(|_| panic!("Failed to serialize provided payload: {}", payload)),
-    )))
+    ))
 }
 
 async fn send_single_request(
@@ -274,13 +274,13 @@ async fn send_single_request(
         hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
         Full<Bytes>,
     >,
-    payload: &Full<Bytes>,
+    payload: &Bytes,
 ) -> Result<Value, RequestError> {
     let request = Request::builder()
         .uri(url)
         .header(hyper::header::USER_AGENT, get_header())
         .method(Method::POST)
-        .body(payload.clone())
+        .body(Full::new(payload.clone()))
         .unwrap();
 
     let res = client.request(request).await.unwrap();
@@ -372,7 +372,7 @@ pub(crate) async fn process_requests(
     let client = client.clone();
     let api_env = api_env.to_string();
     let api_key = api_key.to_string();
-    let allowed_commands = Arc::new(allowed_commands); // avoid cloning vec per task
+    let allowed_commands = Arc::new(allowed_commands);
 
     for payload in payloads {
         let semaphore = semaphore.clone();
@@ -458,7 +458,6 @@ mod tests {
             Ok("https://api.protect.threatx.io".into())
         )
     }
-
     #[test]
     fn get_api_host_part_handles_custom_path() {
         assert_eq!(
@@ -466,9 +465,25 @@ mod tests {
             Ok("https://pratect.please.threatx.io".into())
         )
     }
-
     #[test]
     fn get_api_host_part_handles_no_path() {
         assert!(get_api_host_part("").is_err())
+    }
+    #[test]
+    fn prepare_payload_errors_for_incorrect_command() {
+        let payload = json!({ "command": "login" });
+        let allowed_commands = vec!["limao".to_string(), "something".to_string()];
+        assert!(prepare_payload(payload, &Some(""), &Some(&allowed_commands)).is_err())
+    }
+    #[test]
+    fn prepare_payload_result_contains_token() {
+        let payload = json!({ "command": "login" });
+        let token_value = "1234xyz";
+        let allowed_commands = vec!["login".to_string(), "something".to_string()];
+        let result = prepare_payload(
+            payload, &Some(token_value), &Some(&allowed_commands)
+        ).unwrap();
+        let json_result: Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(json_result.get("token").unwrap(), token_value);
     }
 }
