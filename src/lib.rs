@@ -23,7 +23,7 @@ pub async fn send_requests(
 ) -> Result<Vec<Result<Value, String>>, Box<dyn std::error::Error>> {
     let endpoint_config = &ENDPOINT_MAP[endpoint];
 
-    let client = get_hyper_client();
+    let client = get_hyper_client()?;
     let token = login(api_env, api_key, &client).await?;
 
     let url = format!(

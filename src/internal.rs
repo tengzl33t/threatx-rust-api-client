@@ -21,10 +21,13 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum RequestError {
     TokenExpired,
     IncorrectState,
+    ResponseError(Value),
+    ProcessingError(String)
 }
 
 pub(crate) static ENDPOINT_MAP: LazyLock<HashMap<&str, (u8, Vec<&str>)>> = LazyLock::new(|| {
@@ -224,19 +227,15 @@ pub(crate) fn get_api_version_part(version: u8) -> Result<String, String> {
     Ok(format!("/tx_api/v{}", version))
 }
 
-pub(crate) fn get_hyper_client() -> Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    Full<Bytes>,
-> {
+pub(crate) fn get_hyper_client() -> Result<Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Full<Bytes>>, Box<dyn std::error::Error>> {
     let https = HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .unwrap()
+        .with_native_roots()?
         .https_only()
         .enable_http1()
         .enable_http2()
         .build();
 
-    Client::builder(TokioExecutor::new()).build(https)
+    Ok(Client::builder(TokioExecutor::new()).build(https))
 }
 
 fn prepare_payload(
@@ -244,28 +243,23 @@ fn prepare_payload(
     token: &Option<&str>,
     allowed_commands: &Option<&[String]>,
 ) -> Result<Bytes, Box<dyn std::error::Error>> {
-    let error_msg = format!("Command not found for payload: {}", payload);
     let p_command = payload
         .get("command")
-        .expect(error_msg.as_str())
+        .ok_or("'command' key not found")?
         .as_str()
-        .unwrap()
-        .to_string();
+        .ok_or("'command' key value is not a string")?;
 
-    if allowed_commands.is_some() && !allowed_commands.as_ref().unwrap().contains(&p_command) {
-        return Err(format!("Command not found: {}", p_command).into());
+    if allowed_commands.is_some() && !allowed_commands.as_ref().ok_or("could not ref 'allowed_commands'")?.contains(&p_command.to_string()) {
+        return Err(format!("Command not found: {}", &p_command).into());
     }
     if token.is_some() {
         payload
             .as_object_mut()
-            .unwrap()
+            .ok_or("could not get map out of payload")?
             .insert("token".to_string(), json!(token));
     }
 
-    Ok(Bytes::from(
-        serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| panic!("Failed to serialize provided payload: {}", payload)),
-    ))
+    Ok(Bytes::from(serde_json::to_vec(&payload)?))
 }
 
 async fn send_single_request(
@@ -281,11 +275,11 @@ async fn send_single_request(
         .header(hyper::header::USER_AGENT, get_header())
         .method(Method::POST)
         .body(Full::new(payload.clone()))
-        .unwrap();
+        .map_err(|e| RequestError::ProcessingError(e.to_string()))?;
 
-    let res = client.request(request).await.unwrap();
-    let body = res.collect().await.unwrap().aggregate();
-    let parsed_body: Value = serde_json::from_reader(body.reader()).expect("Failed to parse JSON");
+    let res = client.request(request).await.map_err(|e| RequestError::ProcessingError(e.to_string()))?;
+    let body = res.collect().await.map_err(|e| RequestError::ProcessingError(e.to_string()))?.aggregate();
+    let parsed_body: Value = serde_json::from_reader(body.reader()).map_err(|e| RequestError::ProcessingError(e.to_string()))?;
 
     if let Some(ok) = parsed_body.get("Ok") {
         return Ok(ok.clone());
@@ -294,7 +288,7 @@ async fn send_single_request(
         if error == "Token Expired. Please re-authenticate." {
             return Err(RequestError::TokenExpired);
         }
-        return Ok(error.clone());
+        return Err(RequestError::ResponseError(error.clone()));
     }
     Err(RequestError::IncorrectState)
 }
@@ -320,7 +314,7 @@ async fn process_single_request(
         &Some(&current_token),
         &Some(allowed_commands),
     )
-    .expect("Could not prepare payload");
+    .map_err(|e| format!("{:?}", e))?;
 
     let response = send_single_request(url, client, &bytes_payload).await;
 
@@ -331,7 +325,7 @@ async fn process_single_request(
 
                 let current = token.read().await.clone();
                 if current == current_token {
-                    let refreshed = login(api_env, api_key, client).await.unwrap();
+                    let refreshed = login(api_env, api_key, client).await.map_err(|e| format!("{:?}", e))?;
                     *token.write().await = refreshed.clone();
                     refreshed
                 } else {
@@ -340,8 +334,7 @@ async fn process_single_request(
             };
 
             let bytes_payload =
-                prepare_payload(payload, &Some(&current_token), &Some(allowed_commands))
-                    .expect("Could not prepare payload");
+                prepare_payload(payload, &Some(&current_token), &Some(allowed_commands)).map_err(|e| format!("{:?}", e))?;
 
             send_single_request(url, client, &bytes_payload)
                 .await
@@ -386,7 +379,7 @@ pub(crate) async fn process_requests(
         let allowed_commands = Arc::clone(&allowed_commands);
 
         task_set.spawn(async move {
-            let _semaphore_permit = semaphore.acquire().await.unwrap();
+            let _semaphore_permit = semaphore.acquire().await.map_err(|e| e.to_string())?;
 
             process_single_request(
                 &url,
@@ -423,26 +416,23 @@ pub(crate) async fn login(
         json!({ "api_token": api_key, "command": "login" }),
         &None,
         &None,
-    )
-    .expect("Could not prepare payload");
+    )?;
 
     let response = send_single_request(&url, client, &payload).await;
 
     let token = match response {
         Ok(login_response_value) => login_response_value
             .get("token")
-            .expect("Failed to get token value")
+            .ok_or("Failed to get token value")?
             .clone(),
         Err(err) => return Err(format!("Failed to get login response: {:?}", err).into()),
     };
-
-    println!("Login response: {:?}", token);
 
     if token.is_null() {
         return Err("Failed to get token".into());
     }
 
-    Ok(token.as_str().unwrap().to_string())
+    Ok(token.as_str().ok_or("token is not a string")?.to_string())
 }
 
 #[cfg(test)]
