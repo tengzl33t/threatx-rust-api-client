@@ -34,7 +34,7 @@ Please check API reference guide and the source code for available methods and c
 
 #### Examples
 
-Code examples are available [here](./docs/examples).
+Code examples are available [here](examples).
 
 ## Contributing & Support
 
