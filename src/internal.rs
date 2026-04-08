@@ -10,12 +10,12 @@ Author: tengzl33t
 */
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
-use hyper::{Method, Request, body::Buf};
+use hyper::{body::Buf, Method, Request};
 use hyper_util::rt::TokioExecutor;
 
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -27,7 +27,7 @@ enum RequestError {
     TokenExpired,
     IncorrectState,
     ResponseError(Value),
-    ProcessingError(String)
+    ProcessingError(Value),
 }
 
 pub(crate) static ENDPOINT_MAP: LazyLock<HashMap<&str, (u8, Vec<&str>)>> = LazyLock::new(|| {
@@ -227,7 +227,13 @@ pub(crate) fn get_api_version_part(version: u8) -> Result<String, String> {
     Ok(format!("/tx_api/v{}", version))
 }
 
-pub(crate) fn get_hyper_client() -> Result<Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Full<Bytes>>, Box<dyn std::error::Error>> {
+pub(crate) fn get_hyper_client() -> Result<
+    Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Full<Bytes>,
+    >,
+    Box<dyn std::error::Error>,
+> {
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()?
         .https_only()
@@ -242,14 +248,19 @@ fn prepare_payload(
     mut payload: Value,
     token: &Option<&str>,
     allowed_commands: &Option<&[String]>,
-) -> Result<Bytes, Box<dyn std::error::Error>> {
+) -> Result<Value, Box<dyn std::error::Error>> {
     let p_command = payload
         .get("command")
         .ok_or("'command' key not found")?
         .as_str()
         .ok_or("'command' key value is not a string")?;
 
-    if allowed_commands.is_some() && !allowed_commands.as_ref().ok_or("could not ref 'allowed_commands'")?.contains(&p_command.to_string()) {
+    if allowed_commands.is_some()
+        && !allowed_commands
+            .as_ref()
+            .ok_or("could not ref 'allowed_commands'")?
+            .contains(&p_command.to_string())
+    {
         return Err(format!("Command not found: {}", &p_command).into());
     }
     if token.is_some() {
@@ -259,7 +270,30 @@ fn prepare_payload(
             .insert("token".to_string(), json!(token));
     }
 
-    Ok(Bytes::from(serde_json::to_vec(&payload)?))
+    Ok(payload)
+}
+
+async fn get_response_body(
+    url: &str,
+    client: &Client<
+        hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+        Full<Bytes>,
+    >,
+    payload: &Value,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let bytes_payload = Bytes::from(serde_json::to_vec(&payload)?);
+
+    let request = Request::builder()
+        .uri(url)
+        .header(hyper::header::USER_AGENT, get_header())
+        .method(Method::POST)
+        .body(Full::new(bytes_payload))?;
+
+    let res = client.request(request).await?;
+    let body = res.collect().await?.aggregate();
+    let parsed_body: Value = serde_json::from_reader(body.reader())?;
+
+    Ok(parsed_body)
 }
 
 async fn send_single_request(
@@ -268,25 +302,43 @@ async fn send_single_request(
         hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
         Full<Bytes>,
     >,
-    payload: &Bytes,
+    payload: &Value,
 ) -> Result<Value, RequestError> {
-    let request = Request::builder()
-        .uri(url)
-        .header(hyper::header::USER_AGENT, get_header())
-        .method(Method::POST)
-        .body(Full::new(payload.clone()))
-        .map_err(|e| RequestError::ProcessingError(e.to_string()))?;
+    let marker = payload.get("marker");
+    if let Some(marker) = marker
+        && !marker.is_string()
+        && !marker.is_number()
+    {
+        return Err(RequestError::ProcessingError(json!(
+            "Incorrect marker value provided"
+        )));
+    }
 
-    let res = client.request(request).await.map_err(|e| RequestError::ProcessingError(e.to_string()))?;
-    let body = res.collect().await.map_err(|e| RequestError::ProcessingError(e.to_string()))?.aggregate();
-    let parsed_body: Value = serde_json::from_reader(body.reader()).map_err(|e| RequestError::ProcessingError(e.to_string()))?;
+    let parsed_body = get_response_body(url, client, payload)
+        .await
+        .map_err(|error| {
+            if marker.is_some() {
+                return RequestError::ProcessingError(
+                    json!({"error": error.to_string(), "marker": marker}),
+                );
+            }
+            RequestError::ProcessingError(json!(error.to_string()))
+        })?;
 
     if let Some(ok) = parsed_body.get("Ok") {
+        if marker.is_some() {
+            return Ok(json!({"data": ok, "marker": marker}));
+        }
         return Ok(ok.clone());
     }
     if let Some(error) = parsed_body.get("Error") {
         if error == "Token Expired. Please re-authenticate." {
             return Err(RequestError::TokenExpired);
+        }
+        if marker.is_some() {
+            return Err(RequestError::ResponseError(
+                json!({"error": error, "marker": marker}),
+            ));
         }
         return Err(RequestError::ResponseError(error.clone()));
     }
@@ -309,14 +361,10 @@ async fn process_single_request(
 ) -> Result<Value, String> {
     let current_token = token.read().await.clone();
 
-    let bytes_payload = prepare_payload(
-        payload.clone(),
-        &Some(&current_token),
-        &Some(allowed_commands),
-    )
-    .map_err(|e| format!("{:?}", e))?;
+    let payload = prepare_payload(payload, &Some(&current_token), &Some(allowed_commands))
+        .map_err(|e| format!("{:?}", e))?;
 
-    let response = send_single_request(url, client, &bytes_payload).await;
+    let response = send_single_request(url, client, &payload).await;
 
     match response {
         Err(RequestError::TokenExpired) => {
@@ -325,7 +373,9 @@ async fn process_single_request(
 
                 let current = token.read().await.clone();
                 if current == current_token {
-                    let refreshed = login(api_env, api_key, client).await.map_err(|e| format!("{:?}", e))?;
+                    let refreshed = login(api_env, api_key, client)
+                        .await
+                        .map_err(|e| format!("{:?}", e))?;
                     *token.write().await = refreshed.clone();
                     refreshed
                 } else {
@@ -333,10 +383,10 @@ async fn process_single_request(
                 }
             };
 
-            let bytes_payload =
-                prepare_payload(payload, &Some(&current_token), &Some(allowed_commands)).map_err(|e| format!("{:?}", e))?;
+            let payload = prepare_payload(payload, &Some(&current_token), &Some(allowed_commands))
+                .map_err(|e| format!("{:?}", e))?;
 
-            send_single_request(url, client, &bytes_payload)
+            send_single_request(url, client, &payload)
                 .await
                 .map_err(|e| format!("{:?}", e))
         }
@@ -471,11 +521,8 @@ mod tests {
         let payload = json!({ "command": "login" });
         let token_value = "1234xyz";
         let allowed_commands = vec!["login".to_string(), "something".to_string()];
-        let result = prepare_payload(
-            payload, &Some(token_value), &Some(&allowed_commands)
-        ).unwrap();
-        let json_result: Value = serde_json::from_slice(&result).unwrap();
-        assert_eq!(json_result.get("token").unwrap(), token_value);
+        let result =
+            prepare_payload(payload, &Some(token_value), &Some(&allowed_commands)).unwrap();
+        assert_eq!(result.get("token").unwrap(), token_value);
     }
 }
-
