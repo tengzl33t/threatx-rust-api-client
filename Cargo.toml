@@ -1,7 +1,10 @@
 [package]
 name = "threatx-rust-api-client"
-version = "0.1.0"
+description = "A client library for the ThreatX API"
+version = "1.0.0"
 edition = "2024"
+license = "MPL-2"
+license-file = "LICENSE"
 
 [dependencies]
 hyper = { version = "1.8.1" }
