@@ -15,13 +15,14 @@ use threatx_rust_api_client::send_requests;
 async fn main() {
     let payloads = vec![
         json!({ "command": "list_blacklist", "customer_name": "tenant1" }),
-        json!({ "command": "list_blacklist", "customer_name": "tenant2" }),
-        json!({ "command": "list_blacklist", "customer_name": "tenant3" }),
+        json!({ "command": "list_blacklist", "customer_name": "tenant2", "marker": "marker1234" }),
+        json!({ "command": "list_blacklist", "customer_name": "tenant3", "marker": "marker9876" }),
+        json!({ "command": "list_blacklist", "customer_name": "tenant4" }),
     ];
 
     let responses = send_requests(
         "xplat",
-        "yorkey",
+        "YOUR_API_KEY",
         "lists",
         payloads,
     )

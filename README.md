@@ -18,13 +18,8 @@ interaction with ThreatX API.
 - Async backend
 - Command validation
 - Error handling
-- Response marking [TODO]
+- Response marking
 - Token auto renewal
-
-## Installation
-
-ThreatX Rust API Client supports multiple installation methods.
-See [documentation](./docs/installation.md) for available options.
 
 ## Usage
 
